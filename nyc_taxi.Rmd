@@ -1,0 +1,858 @@
+---
+title: "New York City - Green Taxis Data Analysis"
+author: "Vaishnavi Srinivasan"
+date: "January 20, 2018"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  md_document:
+    variant: markdown_github
+---
+
+```{r setup, include=FALSE, warn.conflicts = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+I am analyzing the data from New York City Taxi and Limousine commission for Green Taxis. The green taxis are not allowed to pick up passengers inside of the densely populated areas of Manhattan. 
+
+I will be analyzing the September 2015 data set, available from below link: http://www.nyc.gov/html/tlc/html/about/trip_record_data.shtml.
+
+Data dictionary: http://www.nyc.gov/html/tlc/downloads/pdf/data_dictionary_trip_records_green.pdf
+Rate information: http://www.nyc.gov/html/tlc/html/passenger/taxicab_rate.shtml
+
+I will be using R for data analysis and visualization. 
+
+I will also be submitting the nyc_taxi.rmd markdown file, when knit can be used to reproduce the results, includes the r-code, its output and my write-up
+
+
+As a first step, all the necessary libraries are downloaded and loaded to memory.
+
+```{r load_library}
+# install.packages("lubridate")
+# install.packages("ggplot2")
+# install.packages("plotrix")
+# install.packages("pastecs")
+# install.packages("randomForest")
+# install.packages("miscTools")
+# install.packages("caret")
+# install.packages("gbm")
+library(randomForest)
+library(reshape2)
+library(plotrix)
+library(ggplot2)
+library(data.table)
+library(lubridate)
+library(pastecs)
+library(miscTools)
+library(caret)
+library(gbm)
+library(MASS)
+library(tidyr)
+```
+
+#Question 1 - Loading Data
+
+To begin the analysis, I will be loading the file in R. If the file is not available in current location, it will be downloaded from https://s3.amazonaws.com/nyc-tlc/trip+data/green_tripdata_2015-09.csv and loaded.
+
+The number of rows, columns and summary statistics per feature of the green taxis trip data is displayed.
+
+```{r load_dataFrame}
+if(!file.exists('green_tripdata_2015-09.csv')){
+  print ("File does not exist so downloading..", quote = FALSE)
+  res <- tryCatch(
+    download.file('https://s3.amazonaws.com/nyc-tlc/trip+data/green_tripdata_2015-09.csv',
+                  'green_tripdata_2015-09.csv', method="auto"), error=function(e) 1)
+}
+print ("Loading the file..", quote = FALSE)
+greenTrip <- read.csv("green_tripdata_2015-09.csv")
+
+attach(greenTrip)
+
+cat ("\n\nNumber of rows in the file: ", nrow(greenTrip))
+cat ("\n\nNumber of columns in the file: ", ncol(greenTrip))
+
+cat ("\n\nSummary of the green taxi NYC data:\n")
+summary(greenTrip)
+```
+
+#Question 2 - Histogram & Structure
+
+The distribution of trip distance is analyzed using a histogram. 
+
+```{r histogram_report}
+min(Trip_distance)
+max(Trip_distance)
+
+ggplot(greenTrip, aes(x = Trip_distance)) + 
+  geom_histogram(colour = "black", fill = "white") +
+  labs(title = "Distribution of Trip Distance",
+       x = "Trip Distance", y = "Count of Trips")
+
+ggplot(greenTrip, aes(x = Trip_distance)) + 
+  geom_histogram(colour = "black", fill = "white") + xlim(c(-1, 150)) +
+  labs(title = "Distribution of Trip Distance (0-150 miles)",
+       x = "Trip Distance", y = "Count of Trips")
+
+ggplot(greenTrip,aes(x = Trip_distance))+
+  geom_histogram(colour = "black", fill = "white") +
+  labs(x="Trip_distance",y="Count of Trips",
+       title="Distribution of Trip Distance (0-15 miles)") +
+  scale_x_continuous(breaks = scales::pretty_breaks(n=8), limits = c(-1,15)) +
+  geom_vline(aes(xintercept = mean(Trip_distance),colour = "mean")
+            , linetype = "dotdash", lwd = 1)+
+  geom_vline(aes(xintercept = median(Trip_distance),colour = "median")
+            , linetype = "twodash", lwd = 1)+
+  geom_vline(aes(xintercept = sd(Trip_distance),colour = "sd")
+            , linetype = "solid", lwd = 1)+
+  geom_vline(aes(xintercept = quantile(Trip_distance, 0.95)
+            ,colour = "quantile"), linetype = "dashed", lwd = 1) +
+  scale_colour_manual(name="Line Color", 
+            values=c(mean="blue", median="cyan", sd="chocolate", quantile="green"))
+
+ggplot(greenTrip,aes(x = log(Trip_distance)))+
+  geom_histogram(colour = "black", fill = "white") +
+  labs(x="Log(Trip_distance)",y="Count of Trips",
+       title="Distribution of Log Transformed Trip Distance") +
+  scale_x_continuous(breaks = scales::pretty_breaks(n=8))
+```
+
+From the histogram of the complete trip distance, I found the most of the data clustered around 0 to 150 miles. But, due to the presence of outliers we are not able to view the complete distribution. Zooming in on trip distance, between 0 and 150 miles, I find the data to be distributed within 15 miles. 
+
+Limiting the trip distance to 15 miles and plotting the mean, median, standard deviation and quantiles, I find the distribution asymmetric and positively skewed. The structure of the distribution is lognormal (http://people.stern.nyu.edu/adamodar/New_Home_Page/StatFile/statdistns.htm - Figure 6A.9: Lognormal distribution). It's standard deviation is 3.07 miles, which is higher than mean (2.96 miles) and the median (1.98 miles). From the 95th quantile, I found 95% of trip distance to be within 8.8 miles.
+
+From the histogram, I found most of the data to be clustered around 0 to 4 miles. My hypothesis - most people tend to use the green taxis for short range distances as nearly 14000 passengers tend to commute within 8 miles. So, these passengers most often be rushing for work or to airports (distance between Queens and JFK, Queens and LaGuardia airport is nearly 6 miles), where the green taxis operate.
+
+#Question 3 - Mean & Median by group
+
+For the next part of my analysis, I will be looking at the trip distance grouped by the hour of day. 
+
+**Assumptions:** The pickUp_datetime feature contains the date and time a passenger boarded the taxi and will be used for for calculating the hour of day. As we are not considering the travel time, dropOff_datetime will not be considered for calculating the hour of day.
+
+```{r aggregate_report}
+pickUpHour = hour(lpep_pickup_datetime)
+tripDistance.median = aggregate(Trip_distance ~ pickUpHour, FUN = median, data = greenTrip)
+tripDistance.mean = aggregate(Trip_distance ~ pickUpHour, FUN = mean, data = greenTrip)
+
+cat("\n\n Median Trip Distance by Pick-up hour is:\n")
+tripDistance.median
+
+ggplot(tripDistance.median, aes(x = pickUpHour, y = Trip_distance)) + geom_point() + 
+  labs(title = "Median Trip Distance for each Pick-Up Hour",
+       x = "Pick-Up Hour", y = "Median Trip Distance")
+
+cat("\n\n Mean Trip Distance by Pick-up hour is:\n")
+tripDistance.mean
+
+ggplot(tripDistance.mean, aes(x = pickUpHour, y = Trip_distance)) + geom_point() + 
+  labs(title = "Mean Trip Distance for each Pick-Up Hour",
+       x = "Pick-Up Hour", y = "Mean Trip Distance")
+
+rm(tripDistance.mean, tripDistance.median)
+```
+
+Plotting the mean and median of the trip distance grouping by hour, I find that people tend to travel during the peak hours - early morning between 5:00 AM to 8:00 AM and at night after 8:00 PM. 
+
+**My hypothesis** Passengers tend to travel more distance at the early hour peak - say, rushing to catch flights or going to work (early shift or a presentation and don't want to be late), and at night after 8:00 PM - say, after working late hours at office. Based on the http://www.businessinsider.com/heres-why-new-york-city-air-traffic-is-so-congested-2015-7, travelers at NYC consider the best time to fly out at early mornings (6:00 AM) which justifies the peak at around 5:00 AM for long distance commute (distance between NYC and Newark is 20 miles).
+
+#Question 3 - Airport trip report
+
+Now I will be looking at the characteristics of the trips originating and terminating at the airports.
+
+**Assumptions** 
+
+- Newark airport is generally considered as NYC airport (all google searches yielded this) even though it is in New Jersey
+
+- http://www.nyc.gov/html/tlc/html/passenger/taxicab_rate.shtml - taxi cabs having a RateCodeID of '02' and '03' have pick-up or drop-off points at JFK and Newark airport respectively
+
+- Got the co-ordinates of Newark, LaGuardia and JFK airports using google and derived a boundary (given below) that covers the area around these airports
+
+JFK Airport:  
+Minimum Latitude is 40.63  
+Maximum Latitude is 40.65  
+Minimum Longitude is -73.82  
+Maximum Longitude is -73.75  
+
+LaGuardia Airport:  
+Minimum Latitude is 40.76  
+Maximum Latitude is 40.78  
+Minimum Longitude is -73.89  
+Maximum Longitude is -73.85  
+
+Newark Airport:  
+Minimum Latitude is 40.67  
+Maximum Latitude is 40.71  
+Minimum Longitude is -74.19  
+Maximum Longitude is -74.15  
+
+Initially, I specified the bounding co-ordinates of the airports for analysis and found the data points to be very less. Looking at the data dictionary (http://www.nyc.gov/html/tlc/downloads/pdf/data_dictionary_trip_records_green.pdf), I found the rate code id to be a good indicator for identifying trips that originated or terminated at one of the NYC area airports. Finally, I merged the data from rate code id and co-ordinates to derive the final value.
+
+```{r airport_report}
+jfkLatMin = 40.63
+jfkLatMax = 40.65
+jfkLongMax = -73.75
+jfkLongMin = -73.82
+lagLatMin = 40.76
+lagLatMax = 40.78
+lagLongMin = -73.89
+lagLongMax = -73.85
+newLatMin = 40.67
+newLatMax = 40.71
+newLongMin = -74.19
+newLongMax = -74.15
+
+airport = subset(greenTrip, (
+  (round(Pickup_longitude,2) >= newLongMin & round(Pickup_longitude,2) <= newLongMax 
+   & round(Pickup_latitude,2) >= newLatMin & round(Pickup_latitude,2) == newLatMax) |
+  (round(Dropoff_longitude,2) >= newLongMin & round(Dropoff_longitude,2) <= newLongMax 
+   & round(Dropoff_latitude,2) >= newLatMin & round(Dropoff_latitude,2) == newLatMax) |
+    (round(Pickup_longitude,2) >= lagLongMin & round(Pickup_longitude,2) <= lagLatMax 
+     & round(Pickup_latitude,2) >= lagLatMin & round(Pickup_latitude,2) == lagLatMax) |
+    (round(Dropoff_longitude,2) >= lagLongMin & round(Dropoff_longitude,2) <= lagLatMax 
+     & round(Dropoff_longitude,2) >= lagLatMin & round(Dropoff_longitude,2) == lagLatMax) |
+    (round(Pickup_longitude,2) >= jfkLongMin & round(Pickup_longitude,2) <= jfkLongMax 
+     & round(Pickup_latitude,2) >= jfkLatMin & round(Pickup_latitude,2) == jfkLatMax) |
+    (round(Dropoff_longitude,2) >= jfkLongMin & round(Dropoff_longitude,2) <= jfkLongMax 
+     & round(Dropoff_longitude,2) >= jfkLatMin & round(Dropoff_longitude,2) == jfkLatMax)))
+cat("\n\nNumber of Transactions that originate or terminate at 
+    one of the NYC area airports (only latitude & longitude): ", nrow(airport))
+cat("\n\nAverage fair amount that originate or terminate at 
+    one of the NYC area airports per trip (only latitude & longitude): $", mean(airport$Fare_amount))
+
+rm(airport)
+
+airportRateCode = subset(greenTrip, (RateCodeID == '2') | (RateCodeID == '3'), group = "A")
+nonAirportRateCode = subset(greenTrip, (RateCodeID != '2') & (RateCodeID != '3'), group = "NA")
+cat("\n\nNumber of Transactions that originate or terminate at one of the NYC area airports
+    (only rate code id): ", nrow(airportRateCode))
+cat("\n\nAverage fair amount that originate or terminate at one of the NYC area airports per
+    trip (only rate code id): $", mean(airportRateCode$Fare_amount))
+
+airport = subset(greenTrip, (
+  (((round(Pickup_longitude,2) >= newLongMin & round(Pickup_longitude,2) <= newLongMax 
+     & round(Pickup_latitude,2) >= newLatMin & round(Pickup_latitude,2) == newLatMax) |
+  (round(Dropoff_longitude,2) >= newLongMin & round(Dropoff_longitude,2) <= newLongMax 
+   & round(Dropoff_latitude,2) >= newLatMin & round(Dropoff_latitude,2) == newLatMax)) 
+  | (RateCodeID == '3')) |
+    (round(Pickup_longitude,2) >= lagLongMin & round(Pickup_longitude,2) <= lagLatMax 
+     & round(Pickup_latitude,2) >= lagLatMin & round(Pickup_latitude,2) == lagLatMax) |
+    (round(Dropoff_longitude,2) >= lagLongMin & round(Dropoff_longitude,2) <= lagLatMax 
+     & round(Dropoff_longitude,2) >= lagLatMin & round(Dropoff_longitude,2) == lagLatMax) |
+    (((round(Pickup_longitude,2) >= jfkLongMin & round(Pickup_longitude,2) <= jfkLongMax 
+       & round(Pickup_latitude,2) >= jfkLatMin & round(Pickup_latitude,2) == jfkLatMax) |
+    (round(Dropoff_longitude,2) >= jfkLongMin & round(Dropoff_longitude,2) <= jfkLongMax 
+     & round(Dropoff_longitude,2) >= jfkLatMin & round(Dropoff_longitude,2) == jfkLatMax)) 
+    | (RateCodeID == '2'))))
+cat("\n\nNumber of Transactions that originate or terminate at 
+    one of the NYC area airports (latitude, longitude and rate code id): ", nrow(airport))
+cat("\n\nAverage fair amount that originate or terminate at 
+    one of the NYC area airports per trip (latitude, longitude and rate code id): $", mean(airport$Fare_amount))
+```
+
+Other important characteristics considered are:
+
+- Distribution of Trip Duration
+
+- Distribution of Trip Distance
+
+- Distribution of Trip Pick-up hour
+
+```{r airport_other_characteristic}
+airportN = subset(greenTrip, (
+  (round(Pickup_longitude,2) >= newLongMin & round(Pickup_longitude,2) <= newLongMax &
+     round(Pickup_latitude,2) >= newLatMin & round(Pickup_latitude,2) == newLatMax) |
+  (round(Dropoff_longitude,2) >= newLongMin & round(Dropoff_longitude,2) <= newLongMax 
+   & round(Dropoff_latitude,2) >= newLatMin & round(Dropoff_latitude,2) == newLatMax)))
+
+airportL = subset(greenTrip, ((round(Pickup_longitude,2) >= lagLongMin & 
+                                 round(Pickup_longitude,2) <= lagLatMax & 
+                                 round(Pickup_latitude,2) >= lagLatMin & 
+                                 round(Pickup_latitude,2) == lagLatMax) |
+    (round(Dropoff_longitude,2) >= lagLongMin & 
+       round(Dropoff_longitude,2) <= lagLatMax & 
+       round(Dropoff_longitude,2) >= lagLatMin & 
+       round(Dropoff_longitude,2) == lagLatMax)))
+
+airportJ = subset(greenTrip, ((round(Pickup_longitude,2) >= jfkLongMin & 
+                                 round(Pickup_longitude,2) <= jfkLongMax & 
+                                 round(Pickup_latitude,2) >= jfkLatMin & 
+                                 round(Pickup_latitude,2) == jfkLatMax) |
+    (round(Dropoff_longitude,2) >= jfkLongMin & 
+       round(Dropoff_longitude,2) <= jfkLongMax & 
+       round(Dropoff_longitude,2) >= jfkLatMin & 
+       round(Dropoff_longitude,2) == jfkLatMax)))
+
+par(mfrow=c(1,3))
+
+ggplot(airportN, aes(x = airportN$Trip_distance)) + 
+  geom_histogram(colour = "black", fill = "white") + xlim(-1, 40) +
+  labs(title = "Distribution of Trip Distance - JFK",
+       x = "Trip Distance", y = "Count of Trips")
+ggplot(airportL, aes(x = airportL$Trip_distance)) + 
+  geom_histogram(colour = "black", fill = "white") + xlim(-1, 40) +
+  labs(title = "Distribution of Trip Distance - LaGuardia",
+       x = "Trip Distance", y = "Count of Trips")
+ggplot(airportJ, aes(x = airportJ$Trip_distance)) + 
+  geom_histogram(colour = "black", fill = "white") + xlim(-1, 40) +
+  labs(title = "Distribution of Trip Distance - Newark ",
+       x = "Trip Distance", y = "Count of Trips")
+
+par(mfrow=c(1,2))
+
+ggplot(airportRateCode, aes(x = airportRateCode$Trip_distance)) + 
+  geom_histogram(colour = "black", fill = "white") + xlim(-1, 40) +
+  labs(title = "Distribution of Trip Distance - Airport Area",
+       x = "Trip Distance", y = "Count of Trips")
+
+ggplot(nonAirportRateCode, aes(x = nonAirportRateCode$Trip_distance)) + 
+  geom_histogram(colour = "black", fill = "white") + xlim(-1, 20) +
+  labs(title = "Distribution of Trip Distance - Non-Airport Area",
+       x = "Trip Distance", y = "Count of Trips")
+
+airportRateCode$airportPickUpHour = hour(airportRateCode$lpep_pickup_datetime)
+
+ggplot(airportRateCode, aes(x = airportRateCode$airportPickUpHour)) + 
+  geom_histogram(colour = "black", fill = "white") +
+  labs(title = "Distribution of Trip Pick-up hour - Airport Area",
+       x = "Trip Pick-up hour(24 hour)", y = "Count of Trips")
+
+nonAirportRateCode$airportPickUpHour = hour(nonAirportRateCode$lpep_pickup_datetime)
+
+ggplot(nonAirportRateCode, aes(x = nonAirportRateCode$airportPickUpHour)) + 
+  geom_histogram(colour = "black", fill = "white") +
+  labs(title = "Distribution of Trip Pick-up hour - Non-Airport Area",
+       x = "Trip Pick-up hour(24 hour)", y = "Count of Trips")
+
+airportRateCode$duration <- difftime(
+  airportRateCode$Lpep_dropoff_datetime,airportRateCode$lpep_pickup_datetime,
+  units="mins")
+
+ggplot(airportRateCode, aes(x = airportRateCode$duration)) + 
+  geom_histogram(colour = "black", fill = "white") + xlim(-1, 150) + ylim(0,500) +
+  labs(title = "Distribution of Trip Duration - Airport Area",
+       x = "Trip Duration(mins)", y = "Count of Trips")
+
+nonAirportRateCode$duration <- difftime(
+  nonAirportRateCode$Lpep_dropoff_datetime,nonAirportRateCode$lpep_pickup_datetime,
+  units="mins")
+
+ggplot(nonAirportRateCode, aes(x = nonAirportRateCode$duration)) + 
+  geom_histogram(colour = "black", fill = "white") + xlim(-1, 75) +
+  labs(title = "Distribution of Trip Duration - Non-Airport Area",
+       x = "Trip Duration(mins)", y = "Count of Trips")
+
+rm(airport, airportRateCode, nonAirportRateCode, airportL, airportJ, airportN)
+```
+
+Based on the graphs above, we can see that 
+
+- Passengers tend to travel to and from LaGuardia using green taxis as they are closer to the NYC boroughs and have a shorter travel distance as well. Passengers using JFK and Newark have a high travel distance and lesser count, comparatively.
+
+- Trips distances to and from airports tend to be around 20 miles (with a minimum of 12 miles from NYC to LaGuardia and a maximum of 20 miles from NYC to Newark), while trips not originating or terminating at airports cover shorter distances with most travels within 5 miles. 
+
+- The distribution for the pick-up hour is nearly the same for airport and non-airport pick-ups, with airport pick-up hour peaking at 03:00 PM and non-airport pick-ups peaking at around 07:00 PM. I can hypothesise that passengers commuting within city, tend to take taxis when they need late night travel and commuters to airports (based on the http://www.businessinsider.com/heres-why-new-york-city-air-traffic-is-so-congested-2015-7 report) like to travel from early hours to mid-day, this trend can be found in the graphs.
+
+- The distribution of trip duration shows how travelling in the city for shorter distances takes shorter time (with most data points around 0 to 20 mins) and the airport trips last longer (with most data points around 50 mins). The longer travel distance for Airport area can be credit to the tourists, most of whom on a tight schedule would want to cover attractions or have a stop-over at friends before their destination, or a passenger opting for a round-about trip while dropping off or picking up their friends or relatives at airports.
+
+#Question 4 - Tip Percent
+
+Now I will analyze the derived variable - tip percent, tip amount as a percentage of the total fare amount.
+
+Summarizing the tip percentage, we find 4172 records having 'NA' as their tip percentage. 
+
+Decoding further, I found the presence of a data points having the total amount as a negative value (with 0 tip) and 0.
+
+Looking at the NYC taxi minimum fare amount from http://nymag.com/nymetro/urban/features/taxi/n_20286/ & http://www.nyc.gov/html/tlc/html/passenger/taxicab_rate.shtml - I found an initial charge of \$2.00 charged for a ride (with airports having a minimum fixed cost), which had been increased to 2.50$.
+
+And so, I filter on the total amount that have a value either equal or more than the initial charge.
+
+```{r tip_percent}
+greenTrip$percTip = Tip_amount * 100 / Total_amount
+summary(greenTrip$percTip)
+attach(greenTrip)
+
+minFare = subset(greenTrip, Total_amount>=2)
+minFare$percTip = minFare$Tip_amount * 100 / minFare$Total_amount
+summary(minFare$percTip)
+nrow(minFare)
+mean(minFare$percTip)
+sd(minFare$percTip)
+
+hist(minFare$percTip, xlab = "Percentage Tip", ylab = "Count",
+     main = "Histogram of Percentage Tip", xlim = c(0, 40), breaks = 50)
+```
+
+Looking at the data distribution, I find most of the passengers giving no tip and mean of tip percent at 17%, which is a good predictor of USA's tipping culture, generally people tend to tip around 20% for good service.
+
+#Question 4 - Predictive Model
+
+Now I begin building the predictive model for tip percentage. 
+
+As the first step, I will start performing data cleansing.
+
+Displaying the statistical information of green taxis data -
+
+```{r cleaning & feature engineering}
+stat.desc(greenTrip)
+```
+
+As we can see from the statistical information, the data for ehail_fee is all N/A, we can drop the feature from dataset.
+
+```{r sub_chunk - 1}
+hist(Payment_type, xlab = "Payment type", ylab = "Count",
+     main = "Histogram of Payment type")
+plot(Payment_type, percTip, xlab = "Payment type", ylab = "Tip Percent",
+     main = "Plot of Payment type vs Tip Percent")
+
+modelData = subset(greenTrip, 
+                   select=c(VendorID,lpep_pickup_datetime,Lpep_dropoff_datetime,RateCodeID,
+                            Pickup_longitude,Pickup_latitude,Dropoff_longitude,Dropoff_latitude,
+                            Passenger_count,Trip_distance,Fare_amount,Extra,MTA_tax,Tip_amount,
+                            Tolls_amount,improvement_surcharge,Total_amount,Payment_type,Trip_type))
+
+modelData <- modelData[(modelData$Payment_type == 1),]
+
+modelData = subset(modelData, 
+                   select=c(VendorID,lpep_pickup_datetime,Lpep_dropoff_datetime,RateCodeID,
+                            Pickup_longitude,Pickup_latitude,Dropoff_longitude,Dropoff_latitude,
+                            Passenger_count,Trip_distance,Fare_amount,Extra,MTA_tax,Tip_amount,
+                            Tolls_amount,improvement_surcharge,Total_amount,Trip_type))
+
+rm(minFare)
+```
+
+Analyzing the dataset I found approximately 40% of the transactions having a tip. Looking at the scatter plot of payment type against the tip percentage, I found more than 90% of the tip received has been from credit card.
+
+There are hardly any passengers tipping by cash. We will not consider payment type 3, 4 or 5 as they do not charge the customer, have a dispute or voided trip. None of these payment types (2, 3, 4 or 5) will contribute to a tip. Any tip wherein the customer is not charged for the ride can be considered as a "gesture of good will", but it not a good explanatory parameter.
+
+And so, I have dropped the payment method field after filtering the data on credit card.
+
+Next, I move on to cleansing the amount fields since the amounts cannot be negative. No additioanl information is available so as why the amount is negative, the below filters are applied:
+
+- NYC taxi minimum fare amount from http://nymag.com/nymetro/urban/features/taxi/n_20286/ & http://www.nyc.gov/html/tlc/html/passenger/taxicab_rate.shtml -  initial charge of $2.00 charged for a ride. (0.49% of data has negative amount)
+
+- Analyzing on the Tip_amount, I found nearly 2000 records have tip amount more than the total charge (Fare_amount+Extra+MTA_tax+improvement_surcharge). These might have happened by chance (someone must have gotten lucky or it could be an outlier). These records are filtered.
+
+After applying the above filter, I found no negative amounts in improvement_surcharge, MTA_tax, Tolls_amount and so no filters are applied on these fields.
+
+Percentage tip is re-calculated for the new subset of data as a derivative of fare_amount, MTA_tax and improvement surcharge (I have not used the total_amount as the total_amount is inclusive of tip amount).
+
+```{r sub_chunk - 2}
+modelData <- modelData[(modelData$Fare_amount >= 2),]
+hist(modelData$improvement_surcharge, xlab = "Improvement Surcharge", ylab = "Count",
+     main = "Histogram of Improvement Surcharge")
+hist(modelData$MTA_tax, xlab = "MTA tax", ylab = "Count",
+     main = "Histogram of MTA tax")
+hist(modelData$Tolls_amount, xlab = "Tolls Amount", ylab = "Count",
+     main = "Histogram of Tolls Amount")
+hist(modelData$Tip_amount, xlab = "Tip Amount", ylab = "Count",
+     main = "Histogram of Tip Amount")
+
+tipDisc = modelData$Tip_amount[modelData$Tip_amount>
+                                 (modelData$Fare_amount+modelData$MTA_tax+modelData$improvement_surcharge)]
+modelData <- modelData[!(modelData$Tip_amount>
+                           (modelData$Fare_amount+modelData$MTA_tax+modelData$improvement_surcharge)),]
+
+modelData$percTip=modelData$Tip_amount*100/(modelData$Fare_amount+modelData$MTA_tax+modelData$improvement_surcharge)
+
+hist(modelData$percTip, xlab = "Tip Percent", ylab = "Count", 
+     main = "Histogram of Tip Percent")
+```
+
+The scatter plot of tip percent against trip distance shows that, as the distance increases, which in turn increases the fare amount, the number of passengers and trip percent decrease. 
+
+Next I move on to cleansing the rate code id, passenger count and geographic co-ordinates fields,
+
+- Count of passengers with RateCodeID greater than 4 are 473 with 81 of them tipping, a tiny sample
+
+- Count of passengers in group of 6 or more are 36 with 28 of them tipping, a tiny sample
+
+- New York City does not encompass longitude and latitudes of 0 degree (this can be due to a faulty device or incorrect caliberation)
+
+- Using http://www.mapdevelopers.com/geocode_bounding_box.php, the bounding co-ordinates of New York city are determined
+
+Records matching the above conditions are filtered out.
+
+```{r sub_chunk - 3}
+plot(modelData$RateCodeID, modelData$percTip, 
+     xlab = "Rate Code ID", ylab = "Tip Percent", 
+     main = "Plot of Rate Code ID vs Tip Percent", 
+     xlim = c(0,7))
+
+plot(modelData$Trip_distance, modelData$percTip, 
+     xlab = "Trip Distance", ylab = "Tip Percent", 
+     main = "Plot of Trip Distance ID vs Tip Percent")
+
+hist(modelData$Passenger_count, 
+     xlab = "Passenger Count", ylab = "Count", 
+     main = "Histogram of Passenger Count")
+
+rateCodeTip = modelData$percTip[modelData$RateCodeID == 4 | modelData$RateCodeID>=6]
+cat ("\nNumber of transactions with rate code id 4 & greater than 6: ", length(rateCodeTip))
+cat ("\nNumber of transactions with rate code id 4 & greater than 6 who tip: ", length(rateCodeTip[rateCodeTip>0]))
+
+passCntTip = modelData$percTip[modelData$Passenger_count>6]
+cat ("\nNumber of transactions with more than 6 passengers: ", length(passCntTip))
+cat ("\nNumber of transactions with more than 6 passengers who tip: ", length(passCntTip[passCntTip>0]))
+
+modelData <- modelData[!(modelData$RateCodeID == 4 | modelData$RateCodeID>=6),]
+modelData <- modelData[!(modelData$Passenger_count>6),]
+
+modelData <- modelData[!(modelData$Pickup_latitude == 0 |
+                           modelData$Pickup_longitude == 0 |
+                           modelData$Dropoff_longitude == 0 |
+                           modelData$Dropoff_latitude == 0),]
+
+modelData <- modelData[(modelData$Pickup_latitude >= 40.477399 
+                        & modelData$Pickup_latitude <= 40.917577) & 
+                         (modelData$Pickup_longitude >= -74.259090 
+                          & modelData$Pickup_longitude <= -73.700272) & 
+                         (modelData$Dropoff_latitude >= 40.477399 
+                          & modelData$Dropoff_latitude <= 40.917577) & 
+                         (modelData$Dropoff_longitude >= -74.259090 
+                          & modelData$Dropoff_longitude <= -73.700272),]
+```
+
+As part of feature engineering, the below fields are derived:
+
+- trip_duration - difference of drop-off and pick-up times in minutes
+
+- dayOfWeek - of the trip
+
+- dayOfMonth - of the trip
+
+- hour - of the trip
+
+- speed - of the trip in miles per hour
+
+The below filters are applied on derived variables:
+
+- Trips longer than 200 minutes are discarded as these may be tourist trips, out of city trips which can be considered as outliers
+
+- The maximum speed limit in New York City is 50 mph and in United States is 137 mph. Trips with Speed more than 140 miles per hour are discarded as this can be attributed to a faulty device or incorrect calibration, and the sample size is small.
+
+```{r sub_chunk - 4}
+modelData$duration <- as.numeric(difftime(
+  modelData$Lpep_dropoff_datetime,modelData$lpep_pickup_datetime,units="mins"))
+
+hist(as.numeric(modelData$duration), xlab = "Duration", ylab = "Count",
+     main = "Histogram of Duration", xlim = c(0,200))
+
+cat ("\nNumber of transactions with duration greater than 200 miles: ", length(modelData$duration[modelData$duration>200]))
+
+modelData <- modelData[(modelData$duration<=200),]
+
+hist(modelData$Trip_distance, xlab = "Trip Distance", ylab = "Count",
+     main = "Histogram of Trip Distance", xlim=c(0,25))
+
+modelData$Speed <- modelData$Trip_distance/(as.numeric(modelData$duration)/60)
+modelData$day = day(modelData$lpep_pickup_datetime)
+modelData$hour = hour(modelData$lpep_pickup_datetime)
+modelData$dayOfWeek = wday(modelData$lpep_pickup_datetime)
+
+modelData <- modelData[!(modelData$Extra<0),]
+
+cat ("\nNumber of transactions with Speed greater than 140 miles: ", length(modelData$Speed[!(is.finite(modelData$Speed) & is.na(modelData$Speed) & modelData$Speed > 140)]))
+
+modelData <- modelData[((is.finite(modelData$Speed) & !is.na(modelData$Speed) & modelData$Speed <= 140)),]
+modelData$willTip[modelData$Tip_amount > 0] <- 1
+modelData$willTip[modelData$percTip == 0] <- 0
+
+modelData <- subset(modelData,
+                    select=c(VendorID,RateCodeID,Pickup_longitude,Pickup_latitude,
+                             Dropoff_longitude,Dropoff_latitude,Passenger_count,
+                             Trip_distance,Fare_amount,Extra,MTA_tax,Tolls_amount,
+                             improvement_surcharge,duration,Speed,day,hour,dayOfWeek,
+                             willTip,percTip,Total_amount,Trip_type))
+```
+
+**Building the model: **
+
+
+Now that data cleansing and engineering is complete, I begin to test the data for linearity.
+
+The scatter plot of tip_percent against rate code id, trip distance and payment type (displayed during data analysis), show that the independent and the dependent variables are not linearly related. Histogram of explanatory variables - payment_type, trip_distance and amount fields show the data points to be log linearly distributed.
+
+To confirm linear regression model doesn't fit, I rum lm function on the features and determine the value of r-squared to be 0.04, which is too low for accuracy prediction.
+
+**Code** for making predictions (logistic and loglinear) is provided in the rmd file along with instructions to run at the top of this file.
+
+```{r regression_linear}
+summary(lm(percTip ~ VendorID+RateCodeID+Pickup_longitude+Pickup_latitude
+           +Dropoff_longitude+Dropoff_latitude+Passenger_count+Trip_distance
+           +Fare_amount+Extra+MTA_tax+Tolls_amount+improvement_surcharge+
+             duration+Speed+day+hour+dayOfWeek+Trip_type, data=modelData))
+```
+
+```{r qqnorm}
+qqnorm(modelData$percTip[modelData$percTip>0], main = "QQ Plot for Tip Percent")
+qqnorm(log(modelData$percTip[modelData$percTip>0]), main = "QQ Plot for Log transfmored Tip Percent")
+```
+
+The qqplot of tip percentage indicates that data is not normal. Applying a log transformation on the data, we can see that the tip percent approaches normality.
+
+Analyzing the data, we find that most of the data points have a tip of 0. This prompted me to build a logistic regression model to predict if passengers are likely to tip and then apply loglinear models to predict the percentage of tip.
+
+Conditional Probability is used to determine the final tip percent:
+
+P(A) = P(A|B) * P(B)
+
+where,
+
+P(A|B) - tip percent given the customer tips
+
+P(B) - customer tips
+
+**Logistic Model**
+
+- A classification model is used for predicting whether a passenger will tip.
+
+- A factor variable "willTip" is created to know if the passenger will tip - set to "1" if tip_amount is greater than zero, else 1.
+
+- Logistic regression model is used for training and making predictions.
+
+- A random sample of 80% of the data from the input dataset is used for training and 20% for testing.
+
+- We use stepAIC function to derive the final list of features that can be used for improving the accuracy of the model. Before applying the stepAIC, AIC value was 421009 and after applying the function stepAIC reduced to 421000.
+
+      + stepAIC - Performs stepwise model selection by AIC. The model specified is re-run each time with a feature eliminated to determine, which model gives a good prediction for tip percentage.
+
+- Based on the output of stepAIC the best features used for prediction are - VendorID, RateCodeID, Pickup_longitude, Pickup_latitude, Dropoff_longitude, Dropoff_latitude, Passenger_count, Trip_distance, Extra, MTA_tax Tolls_amount, duration, Speed, day, hour, dayOfWeek, and Trip_type.
+
+- The features specified by stepAIC make sense - 
+
+      + one vendor may provide better service, 
+  
+      + passengers from certain area may be more leaned towards tipping, 
+  
+      + passengers travelling at rush hour may tend to tip when they reach destination on time, 
+  
+      + if the driver drives rashly passengers do not tend to tip.
+
+- Using the testing data set, we make predictions if the customer will tip.
+
+```{r regression_logistic}
+modelData$willTip <- as.factor(modelData$willTip)
+
+trainSample <- sample(1:nrow(modelData),.8*nrow(modelData))
+train = modelData[trainSample,]
+
+test = modelData[-trainSample,]
+
+link = glm(formula=willTip~VendorID+RateCodeID+Pickup_longitude+Pickup_latitude+
+             Dropoff_longitude+Dropoff_latitude+Passenger_count+Trip_distance+
+             Fare_amount+Extra+MTA_tax+Tolls_amount+improvement_surcharge+duration+
+             Speed+day+hour+dayOfWeek+Trip_type, data=train, family=binomial(link="logit"))
+summary(link)
+stepAIC(link, scale = 0, direction = "both")
+
+link = glm(formula=willTip~VendorID+RateCodeID+Pickup_longitude+Pickup_latitude+
+             Dropoff_longitude+Dropoff_latitude+Passenger_count+Trip_distance+
+             Extra+MTA_tax+Tolls_amount+duration+Speed+day+hour, 
+           data=train, family=binomial(link="logit"))
+summary(link)
+
+test$response=predict.glm(link, newdata = test, type = "response")
+trainlm <- train[(train$willTip=="1"),]
+```
+
+**Log Linear Model: **
+
+- A regression model is used for predicting tip percentage.
+
+- Loglinear model with gaussian distribution used as the predictor is a continous variable.
+
+- The training and testing data set from logistic regression is reused for making prediction the percentage of tip, if passenger will tip.
+
+- We use stepAIC function to derive the final list of features that can be used for improving the accuracy of the model. AIC reduced from 3205026 to 3205000.
+
+- Using the testing data set, we make predictions the percentage of tip from the passenger.
+
+```{r regression_loglinear}
+glmlog = glm(formula=percTip~VendorID+RateCodeID+Pickup_longitude+
+               Pickup_latitude+Dropoff_longitude+Dropoff_latitude+
+               Passenger_count+Trip_distance+Fare_amount+Extra+
+               MTA_tax+Tolls_amount+duration+Speed+Trip_type, data=trainlm, 
+             family=gaussian(link="log"))
+summary(glmlog)
+
+stepAIC(glmlog, scale = 0, direction = "both")
+
+glmlog = glm(formula=percTip~VendorID+Pickup_longitude+Pickup_latitude
+                     +Dropoff_longitude+Dropoff_latitude+             
+                       Fare_amount+Tolls_amount+duration+Speed, 
+                     data=trainlm, family=gaussian(link="log"))
+summary(glmlog)
+test$tipResponse=predict.glm(glmlog, newdata = test, type = "response")
+
+test$predTipPerc=test$response*test$tipResponse
+predict<-subset(test,select=c(Fare_amount,Speed,Trip_distance,percTip,predTipPerc))
+
+predictTable<-gather(predict,type,value,percTip:predTipPerc,factor_key = TRUE)
+
+ggplot(predictTable, aes(x=Speed,y=value,group=type, color=type))+geom_smooth() +
+  labs(title = "Plot of Actual vs Predicted",
+       x = "Speed", y = "Tip Percentage")
+ggplot(predictTable, aes(x=Trip_distance,y=value,group=type, color=type))+geom_smooth() +
+  labs(title = "Plot of Actual vs Predicted",
+       x = "Trip Distance", y = "Tip Percentage")
+
+rm(predictTable, glmlog, link, train, test, trainlm)
+```
+
+- Response variable from logistic and log linear regression models in stored in test dataset.
+
+- The tip percentage is calculated by multiplying the response value of logistic with log linear regression, using the conditional probability defined.
+
+- We then, plot the actual vs the predicted tip percentage and can see that,
+
+      + The model does a good job of predicting values that have low standard deviation in the actual data
+      
+      + Points where the actual data has high standard deviation, there model is predicting low values of tip. This is again valid, as from the scatter plot of Fare Amount against Percentage Tip, we found most of the passengers tend to tip a either no or a lower amount as the duration increases (which in turn increases the trip fare amount).
+
+**Future direction:**
+
+As part of future work, I would prefer to do predictions using random forest model with stratified cross validation to achieve a better accuracy. Below is sample execution of random forest and random forest with cross validation.
+
+- The below testing is performed using 1% of random sample cleansed data that is not a good representation of the overall data set.
+
+- Currently, the models are generating a very low r^2 (or) % variance explained. Using a bigger dataset with atleast 10 cross validations, we would be able to achieve a better predictive model.
+
+Also, as the dependent variable is not perfectly normal, it would be a good idea to use a generalized additive model with gamma distribution.
+
+Given more time and better processor, we can also run random forest with cross validation to generate models with higher accuracy.
+
+```{r random_forest}
+trainSample <- sample(1:nrow(modelData),.05*nrow(modelData))
+train = modelData[trainSample,]
+model <- randomForest(percTip ~ VendorID+RateCodeID+Pickup_longitude+Pickup_latitude+Dropoff_longitude+Dropoff_latitude+Passenger_count+Trip_distance+Fare_amount+Extra+MTA_tax+Tolls_amount+improvement_surcharge+duration+Speed+day+hour+dayOfWeek, data=train, importance=TRUE, ntree=250)
+model
+gc()
+
+trainSample <- sample(1:nrow(modelData),.01*nrow(modelData))
+train = modelData[trainSample,]
+model <- train(percTip~VendorID+RateCodeID+Pickup_longitude+Pickup_latitude+Dropoff_longitude+Dropoff_latitude+Passenger_count+Trip_distance+Fare_amount+Extra+MTA_tax+Tolls_amount+improvement_surcharge+duration+Speed+day+hour+dayOfWeek, data=train, trControl=trainControl(method = "cv", number = 5, allowParallel=TRUE), method="rf")
+model
+gc()
+rm(modelData, predmatrix)
+```
+
+#Question 5 - Distribution - Average Speed
+
+Now I derive Speed, distance (trip_distance) by time (trip_duration), a new explanatory variable for analysis.
+
+The derived variable has nearly 4000 records as NA's or infinite. This is associated to most of the trips having  0 trip distance. Speed also has a maximum value of 2000 mph.
+
+Using google search, I found the maximum speed limit in New York City to be 50 mph and in United States to be 137 mph. And so, data is cleansed to include records having Speed within 140 miles per hour.
+
+```{r distribution}
+minDate = min(date(lpep_pickup_datetime))
+greenTrip$duration <- difftime(Lpep_dropoff_datetime,lpep_pickup_datetime,units="mins")
+for (i in seq(1, 5, 1)){
+  currRange = minDate + 7
+  greenTrip$week[(date(lpep_pickup_datetime) >= minDate) & (date(lpep_pickup_datetime) < currRange)] <- i
+  minDate = currRange
+}
+greenTrip$Speed <- Trip_distance/(as.numeric(greenTrip$duration)/60)
+
+speedSubset = subset(greenTrip, (is.finite(greenTrip$Speed) & !is.na(greenTrip$Speed) & greenTrip$Speed <= 140))
+
+week.mean = aggregate(speedSubset$Speed ~ speedSubset$week, FUN = mean, data = speedSubset)
+week.mean
+
+week.sd = aggregate(speedSubset$Speed ~ speedSubset$week, FUN = sd, data = speedSubset)
+week.sd
+
+rm(week.mean, week.sd)
+
+boxplot(speedSubset$Speed ~ speedSubset$week, ylim = c(0,20))
+```
+
+**Analyzing** : 
+
+If the average trip speeds are materially the same in all weeks of September.
+
+**Test Used:**
+
+I have used ANOVA test with the null hypothesis that the average trip speeds are same in all weeks. 
+
+```{r week by speed}
+summary(aov(speedSubset$Speed ~ speedSubset$week))
+
+for (i in seq(1,5,1)){
+  j = i+1
+  while (j<=5){
+    cat ("\n\nt.test(Speed[week == ", i,"], Speed[week == ", j,"])\n\n")
+    x = speedSubset$Speed[speedSubset$week == i]
+    y = speedSubset$Speed[speedSubset$week == j]
+    print (t.test(x, y))
+    j = j + 1
+  }
+}
+```
+
+The p-value of the ANOVA test is very small and close to 0. Thus, the null hypothesis is rejected - the average trip speeds are not same in all weeks.
+
+A 2-sample t-test, with significance value set at 0.05, is performed on all the weeks, to check if the means are same between any two weeks, but the p-vale is again close to 0 for all t-tests and no two weeks have the same means.
+
+My hypothesis for average speed variation (based on the boxplot) is below:
+
+- Week 1 - Includes the Labor Day (September 7) long weekend. People would be entering or leaving the city for vacation on different dates. There would be less than normal traffic on these dates causing the average speed to be higher comparatively.
+
+- Week 2 - People would be returning or leaving from vacation after the long weekend, causing traffic jam on Tuesday, whereby reducing the average speed of the week
+
+- Week 3 - Most of the people would have returned to their daily routine and few people would still be returning from a long vacation, average speed of the week would be returning to normal
+
+- Week 4 - People would have returned to their daily routines and traffic would be less as daily commuters in NYC tend to take public transports and so the average speed is more compared to previous weeks. This would be a good approximate of the average speed of the week
+
+- Week 5 - Has only two days with peak Monday traffic which is why the average traffic is more.
+
+
+To analyze, if the average trip speeds are same in the hours of day, I have used ANOVA test with the null hypothesis that the average trip speeds are same in all hours. 
+
+```{r hour by speed}
+speedSubset$hour = hour(speedSubset$lpep_pickup_datetime)
+boxplot(speedSubset$Speed ~ speedSubset$hour, ylim = c(5,25))
+
+summary(aov(speedSubset$Speed ~ speedSubset$hour))
+
+for (i in seq(0,23,1)){
+  j = i+1
+  while (j<=23){
+    cat ("\n\nt.test(Speed[hour == ", i,"], Speed[hour == ", j,"])\n\n")
+    x = speedSubset$Speed[speedSubset$hour == i]
+    y = speedSubset$Speed[speedSubset$hour == j]
+    print (t.test(x, y))
+    j = j + 1
+  }
+}
+rm(speedSubset, greenTrip)
+```
+
+The p-value of the ANOVA test is very small and close to 0. Thus, the null hypothesis is rejected - the average trip speeds are not same for all hours.
+
+A 2-sample t-test, with significance value set at 0.05, is performed on all the hours, to check if the means are same between any two hours, the results of p-value is given below:
+
+- Hours 8:00 AM and 11:00 AM, 9:00 AM and 10:00 AM have the same mean - p-value is greater than significance value
+
+      + peak hour traffic would be nearly same, people start leaving for office around 7:00 AM and reach around 11:00 AM causing the average to be approximately same between 8:00 AM and 11:00 AM. Thus, the average speed is same.
+
+- Hours 1:00 PM and 7:00 PM, 2:00 PM and 6:00 PM have the same mean - p-value is greater than significance value
+
+      + mid-day traffic and just after office hours traffic would be nearly same as roads would be cleared from morning rush hour (between 7 to 11 AM and evening rush hour 4-5 PM). Thus, the average speed is same.
+
+- Hours 4:00 PM and 5:00 PM have the same mean - p-value is greater than significance value
+
+      + evening peak hour traffic would be nearly same, people start leaving from office around 4:00 PM causing the average speed to be approximately same
+
+- For the remaining combination of hours, p-value is close to 0 and so they don't have the same means.
+
+My hypothesis for average speed variation (based on the boxplot) is below:
+
+- average speed is increasing continuously from mid-night, 00:00 AM to 5:00 AM, as majority of the people would be home, and the roads would be empty
+
+- average speed dropped at 7:00 AM and continuous nearly the same during the morning peak hours, 7:00 AM to 11:00 AM, as people would be rushing to office
+
+- average speed is fluctuating during mid-day, 10:00 AM to 5:00 PM, schools would close, people will be running errands randomly and would start leaving office
+
+- average speed is increasing slowly after evening peak hours, 6:00 PM to 11:00 PM, as people would have reached home
